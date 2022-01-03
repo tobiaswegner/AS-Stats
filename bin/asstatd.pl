@@ -9,7 +9,7 @@ use strict;
 use 5.010;
 use Socket qw(AF_INET6 inet_ntop);
 use IO::Select;
-use IO::Socket;
+use IO::Socket::IP;
 use RRDs;
 use Getopt::Std;
 use Scalar::Util qw(looks_like_number);
@@ -119,14 +119,14 @@ my $sel = IO::Select->new();
 
 # prepare to listen for NetFlow UDP packets
 if ($server_port > 0) {
-	$lsn_nflow = IO::Socket::INET->new(LocalPort => $server_port, Proto => "udp")
+	$lsn_nflow = IO::Socket::IP->new(LocalHost => "::", LocalPort => $server_port, Proto => "udp")
 		or die "Couldn't be a NetFlow UDP server on port $server_port : $@\n";
 	$sel->add($lsn_nflow);
 }
 # prepare to listen for sFlow UDP packets
 if ($sflow_server_port > 0) {
 	require Net::sFlow;
-	$lsn_sflow = IO::Socket::INET->new(LocalPort => $sflow_server_port, Proto => "udp")
+	$lsn_sflow = IO::Socket::IP->new(LocalHost => "::", LocalPort => $sflow_server_port, Proto => "udp")
 		or die "Couldn't be a sFlow UDP server on port $sflow_server_port : $@\n";
 	$sel->add($lsn_sflow);
 }
@@ -147,8 +147,8 @@ while (1) {
 			$him = $server->recv($datagram, $MAXREAD);
 			next if (!$him);
 			
-			my ($port, $ipaddr) = sockaddr_in($server->peername);
-			
+			my $ipaddr = $server->peerhost;
+
 			if (defined($lsn_nflow) && $server == $lsn_nflow) {
 				my ($version) = unpack("n", $datagram);
 				
@@ -202,7 +202,7 @@ sub parse_netflow_v5 {
 		my $srcas = replace_asn($srcip, $flowdata[15]);
 		my $dstas = replace_asn($dstip, $flowdata[16]);
 
-		#print "ipaddr: " . inet_ntoa($ipaddr) . " octets: $flowdata[6] srcas: $srcas dstas: $dstas in: $flowdata[3] out: $flowdata[4] 4 \n";
+		#print "ipaddr: $ipaddr octets: $flowdata[6] srcas: $srcas dstas: $dstas in: $flowdata[3] out: $flowdata[4] 4 \n";
 		handleflow($ipaddr, $flowdata[6], $srcas, $dstas, $flowdata[3], $flowdata[4], 4, 'netflow');
 	}
 }
@@ -225,7 +225,7 @@ sub parse_netflow_v8 {
 	for (my $i = 0; $i < $count; $i++) {
 		my $flowrec = substr($datagram, $v8_header_len + ($i*$v8_flowrec_len), $v8_flowrec_len);
 		my @flowdata = unpack("NNNNNnnnn", $flowrec);
-		#print "ipaddr: " . inet_ntoa($ipaddr) . " octets: $flowdata[2] srcas: $flowdata[5] dstas: $flowdata[6] in: $flowdata[7] out: $flowdata[8] 4 \n";
+		#print "ipaddr: $ipaddr octets: $flowdata[2] srcas: $flowdata[5] dstas: $flowdata[6] in: $flowdata[7] out: $flowdata[8] 4 \n";
 		handleflow($ipaddr, $flowdata[2], $flowdata[5], $flowdata[6], $flowdata[7], $flowdata[8], 4, 'netflow');
 	}
 }
@@ -272,7 +272,7 @@ sub parse_netflow_v9_template_flowset {
 
 		last if (!defined($template_id) || !defined($fldcount));
 
-		#print "Updated template ID $template_id (source ID $source_id, from " . inet_ntoa($ipaddr) . ")\n";
+		#print "Updated template ID $template_id (source ID $source_id, from $ipaddr)\n";
 		my $template = [@template_ints[($i+2) .. ($i+2+$fldcount*2-1)]];
 		$v9_templates->{$ipaddr}->{$source_id}->{$template_id}->{'template'} = $template;
 		
@@ -296,7 +296,7 @@ sub parse_netflow_v9_data_flowset {
 	
 	my $template = $v9_templates->{$ipaddr}->{$source_id}->{$flowsetid}->{'template'};
 	if (!defined($template)) {
-		#print "Template ID $flowsetid from $source_id/" . inet_ntoa($ipaddr) . " does not (yet) exist\n";
+		#print "Template ID $flowsetid from $source_id/$ipaddr does not (yet) exist\n";
 		return;
 	}
 	
@@ -440,7 +440,7 @@ sub parse_netflow_v10_template_flowset {
 
 		last if (!defined($template_id) || !defined($fldcount));
 
-		#print "Updated template ID $template_id (source ID $source_id, from " . inet_ntoa($ipaddr) . ")\n";
+		#print "Updated template ID $template_id (source ID $source_id, from $ipaddr)\n";
 		my $template = [@template_ints[($i+2) .. ($i+2+$fldcount*2-1)]];
 
 		$v10_templates->{$ipaddr}->{$source_id}->{$template_id}->{'template'} = $template;
@@ -465,7 +465,7 @@ sub parse_netflow_v10_data_flowset {
 
 	my $template = $v10_templates->{$ipaddr}->{$source_id}->{$flowsetid}->{'template'};
 	if (!defined($template)) {
-		#print "Template ID $flowsetid from $source_id/" . inet_ntoa($ipaddr) . " does not (yet) exist\n";
+		#print "Template ID $flowsetid from $source_id/$ipaddr does not (yet) exist\n";
 		return;
 	}
 	
@@ -555,7 +555,7 @@ sub parse_sflow {
 
 	# use agent IP if available (in case of proxy)
 	if ($sFlowDatagramRef->{'AgentIp'}) {
-		$ipaddr = inet_aton($sFlowDatagramRef->{'AgentIp'});
+		$ipaddr = $sFlowDatagramRef->{'AgentIp'};
 	}
 	
 	foreach my $sFlowSample (@{$sFlowSamplesRef}) {
@@ -726,13 +726,13 @@ sub handleflow {
 	if ($srcas == 0) {
 		$as = $dstas;
 		$direction = "out";
-		$ifalias = $knownlinks{inet_ntoa($routerip) . '_' . $snmpout . '/' . $vlanout} if defined($vlanout);
-		$ifalias //= $knownlinks{inet_ntoa($routerip) . '_' . $snmpout};
+		$ifalias = $knownlinks{$routerip . '_' . $snmpout . '/' . $vlanout} if defined($vlanout);
+		$ifalias //= $knownlinks{$routerip . '_' . $snmpout};
 	} elsif ($dstas == 0) {
 		$as = $srcas;
 		$direction = "in";
-		$ifalias = $knownlinks{inet_ntoa($routerip) . '_' . $snmpin . '/' . $vlanin} if defined($vlanin);
-		$ifalias //= $knownlinks{inet_ntoa($routerip) . '_' . $snmpin};
+		$ifalias = $knownlinks{$routerip . '_' . $snmpin . '/' . $vlanin} if defined($vlanin);
+		$ifalias //= $knownlinks{$routerip . '_' . $snmpin};
 	} else {
 		handleflow($routerip, $noctets, $srcas, 0, $snmpin, $snmpout, $ipversion, $type, $vlanin, $vlanout, $peeras);
 		handleflow($routerip, $noctets,	0, $dstas, $snmpin, $snmpout, $ipversion, $type, $vlanin, $vlanout, $peeras);
